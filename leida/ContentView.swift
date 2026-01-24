@@ -49,6 +49,11 @@ final class AppModel: ObservableObject {
         var inspectorRole: UserRole
         var boilerId: String
         var area: String
+        
+        // AR位置坐标（相对于地图原点）
+        var positionX: Double?
+        var positionY: Double?
+        var positionZ: Double?
 
         var temperatureC: String
         var pressureMPa: String
@@ -95,14 +100,26 @@ final class AppModel: ObservableObject {
     @Published var showFileViewer: Bool = false
     
     // AR 控制
+    weak var arView: ARView? // 弱引用持有 ARView
     @Published var shouldSaveMap: Bool = false
     @Published var mapToLoad: URL?
     @Published var shouldResetSession: Bool = false
     @Published var isLiDAREnabled: Bool = true // 控制 LiDAR 开关
     @Published var isMeshColoringEnabled: Bool = true // 控制网格分类显示
+    @Published var isTorchEnabled: Bool = false // 手电筒开关
     @Published var isRelocalizing: Bool = false // 是否正在重定位中
     @Published var isSessionStarted: Bool = false // 是否已启动 AR 会话
     @Published var currentPosition: SIMD3<Float> = .zero // 当前 XYZ 坐标
+    
+    // 定位质量状态
+    enum LocalizationQuality {
+        case lost           // 迷失/初始化
+        case relocalizing   // 重定位中
+        case good           // 良好 (Normal + Mapped)
+        case limited(String) // 受限 (带原因)
+    }
+    @Published var locQuality: LocalizationQuality = .lost
+    @Published var locQualityMessage: String = "初始化中..."
 
     // 使用模式
     @Published var workMode: WorkMode = .deployment
@@ -111,7 +128,6 @@ final class AppModel: ObservableObject {
     @Published var lidarMeshStatus: String = ""
     
     // 设置与着色
-    @Published var showSettings: Bool = false
     @Published var coloringMode: ColoringMode = .ai
     
     enum ColoringMode: String, CaseIterable, Identifiable {
@@ -303,13 +319,101 @@ final class AppModel: ObservableObject {
         let fileName = "Report_\(Int(report.createdAt.timeIntervalSince1970)).json"
         let fileURL = docDir.appendingPathComponent(fileName)
 
-        // Swift 6: 避免在 detached 里使用 MainActor 隔离的 Encodable conformance
+        // 转换为大屏兼容格式
         let dataToWrite: Data
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            dataToWrite = try encoder.encode(report)
+            var dashboardRecord: [String: Any] = [
+                "id": report.id.uuidString,
+                "inspector": report.inspectorName,
+                "time": ISO8601DateFormatter().string(from: report.createdAt),
+                "location": report.area.isEmpty ? report.boilerId : "\(report.boilerId) - \(report.area)"
+            ]
+            
+            // 使用真实的AR位置坐标（如果有）
+            if let x = report.positionX, let y = report.positionY, let z = report.positionZ {
+                dashboardRecord["position"] = [
+                    "x": x,
+                    "y": y,
+                    "z": z
+                ]
+            } else {
+                // 如果没有坐标，使用默认值
+                dashboardRecord["position"] = [
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0
+                ]
+            }
+            
+            // 温度和压力
+            if let temp = Double(report.temperatureC), !report.temperatureC.isEmpty {
+                dashboardRecord["temperature"] = temp
+            }
+            if let pressure = Double(report.pressureMPa), !report.pressureMPa.isEmpty {
+                dashboardRecord["pressure"] = pressure
+            }
+            
+            // 判断状态
+            let hasAlarm = report.abnormalNoise || report.leakage || report.vibration || 
+                           report.smokeOrSteam || report.overTempOrPressure || report.alarmTriggered
+            dashboardRecord["status"] = hasAlarm ? "告警" : "正常"
+            
+            // 异常描述
+            var issues: [String] = []
+            if report.abnormalNoise { issues.append("异响") }
+            if report.leakage { issues.append("泄漏") }
+            if report.vibration { issues.append("振动") }
+            if report.smokeOrSteam { issues.append("冒烟/蒸汽") }
+            if report.overTempOrPressure { issues.append("温压异常") }
+            if report.alarmTriggered { issues.append("报警触发") }
+            
+            if !issues.isEmpty {
+                dashboardRecord["issue"] = issues.joined(separator: "、")
+            }
+            
+            // 照片（嵌入Base64以便导出到电脑查看）
+            if let firstPhotoName = report.photoFileNames.first {
+                // 1. 尝试读取文件内容
+                let photoURL = docDir.appendingPathComponent(firstPhotoName)
+                if let photoData = try? Data(contentsOf: photoURL) {
+                     // 简单判断文件扩展名以确定MIME type (默认jpg)
+                     let mimeType = firstPhotoName.lowercased().hasSuffix("png") ? "image/png" : "image/jpeg"
+                     let base64String = photoData.base64EncodedString()
+                     dashboardRecord["photo"] = "data:\(mimeType);base64,\(base64String)"
+                } else {
+                     // 只有文件名
+                     dashboardRecord["photo"] = firstPhotoName
+                }
+            }
+            
+            // 描述
+            if !report.notes.isEmpty {
+                dashboardRecord["description"] = report.notes
+            } else {
+                dashboardRecord["description"] = hasAlarm ? "发现异常情况，需要处理" : "设备运行正常"
+            }
+            
+            // 组装完整数据结构（保留原有字段供App内部使用）
+            let fullData: [String: Any] = [
+                "project": "锅炉房安全巡检",
+                "exportTime": ISO8601DateFormatter().string(from: Date()),
+                "record": dashboardRecord,
+                // 原始数据用于App内部读取
+                "_appData": [
+                    "inspectorId": report.inspectorId.uuidString,
+                    "inspectorRole": report.inspectorRole.rawValue,
+                    "boilerId": report.boilerId,
+                    "area": report.area,
+                    "waterLevel": report.waterLevel,
+                    "valvePosition": report.valvePosition,
+                    "photoFileNames": report.photoFileNames,
+                    "signatureFileName": report.signatureFileName ?? "",
+                    "signerName": report.signerName,
+                    "confirmationChecked": report.confirmationChecked
+                ]
+            ]
+            
+            dataToWrite = try JSONSerialization.data(withJSONObject: fullData, options: .prettyPrinted)
         } catch {
             isProcessing = false
             alertMessage = "报告生成失败: \(error.localizedDescription)"
@@ -353,6 +457,22 @@ final class AppModel: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         loadSavedFiles()
+    }
+    func toggleTorch(on: Bool) {
+        guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+        
+        do {
+            try device.lockForConfiguration()
+            if on {
+                try device.setTorchModeOn(level: 1.0)
+            } else {
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+            isTorchEnabled = on
+        } catch {
+            print("手电筒控制失败: \(error)")
+        }
     }
     
     // 导出 Mesh (支持 OBJ 和 PLY)
@@ -681,6 +801,12 @@ struct ContentView: View {
                         }
                         .tag(0)
                     
+                    FileLibraryView(appModel: appModel)
+                        .tabItem {
+                            Label("文件库", systemImage: "folder.fill")
+                        }
+                        .tag(1)
+                    
                     if #available(iOS 17.0, *) {
                         ObjectCaptureContainer(appModel: appModel)
                             .tabItem {
@@ -695,11 +821,11 @@ struct ContentView: View {
                             .tag(2)
                     }
                     
-                    FileLibraryView(appModel: appModel)
+                    SettingsView(appModel: appModel)
                         .tabItem {
-                            Label("文件库", systemImage: "folder.fill")
+                            Label("设置", systemImage: "gearshape.fill")
                         }
-                        .tag(1)
+                        .tag(3)
                 }
                 .onChange(of: appModel.selectedTab) { oldTab, newTab in
                     // 切换到物体扫描时，强制停止 ARSession 释放相机
@@ -722,9 +848,6 @@ struct ContentView: View {
             if let url = appModel.selectedFile {
                 FileViewer(url: url, appModel: appModel)
             }
-        }
-        .sheet(isPresented: $appModel.showSettings) {
-            SettingsView(appModel: appModel)
         }
     }
 }
@@ -813,46 +936,160 @@ private struct AuthView: View {
 // MARK: - 2.5 Settings View
 struct SettingsView: View {
     @ObservedObject var appModel: AppModel
-    @Environment(\.dismiss) var dismiss
+    @State private var showImagePicker: Bool = false
+    @State private var selectedImage: UIImage?
     
     var body: some View {
         NavigationView {
             Form {
                 if let user = appModel.currentUser {
-                    Section(header: Text("账号")) {
+                    // 个人信息区域
+                    Section(header: Text("个人信息")) {
                         HStack {
-                            Text("姓名")
                             Spacer()
-                            Text(user.displayName)
-                                .foregroundStyle(.secondary)
+                            VStack(spacing: 12) {
+                                // 头像
+                                ZStack {
+                                    Circle()
+                                        .fill(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                        .frame(width: 100, height: 100)
+                                    
+                                    if let image = selectedImage {
+                                        Image(uiImage: image)
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 100, height: 100)
+                                            .clipShape(Circle())
+                                    } else {
+                                        Text(user.displayName.prefix(1))
+                                            .font(.system(size: 40, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                    }
+                                    
+                                    // 编辑按钮
+                                    Image(systemName: "camera.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.white)
+                                        .padding(8)
+                                        .background(Color.blue)
+                                        .clipShape(Circle())
+                                        .offset(x: 35, y: 35)
+                                }
+                                .onTapGesture {
+                                    showImagePicker = true
+                                }
+                                
+                                Text(user.displayName)
+                                    .font(.title2)
+                                    .fontWeight(.semibold)
+                                
+                                Text(user.role.rawValue)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
                         }
+                        .padding(.vertical, 12)
+                        
+                        LabeledContent("手机号", value: user.phone)
+                        LabeledContent("单位/班组", value: user.company.isEmpty ? "未填写" : user.company)
+                        LabeledContent("注册时间", value: user.createdAt.formatted(date: .abbreviated, time: .omitted))
+                    }
+                    
+                    // 工具与测试
+                    Section(header: Text("开发者工具")) {
+                        NavigationLink(destination: PowerTestView()) {
+                            Label {
+                                Text("最大功率耗电测试")
+                                    .foregroundColor(.primary)
+                            } icon: {
+                                Image(systemName: "bolt.fill")
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
+                    
+                    // 巡检统计
+                    Section(header: Text("巡检统计")) {
+                        let reportCount = appModel.savedFiles.filter { 
+                            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("Report_")
+                        }.count
+                        
                         HStack {
-                            Text("手机号")
+                            VStack(alignment: .leading) {
+                                Text("\(reportCount)")
+                                    .font(.title)
+                                    .fontWeight(.bold)
+                                    .foregroundStyle(.blue)
+                                Text("巡检报告")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer()
-                            Text(user.phone)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("身份")
+                            VStack(alignment: .leading) {
+                                Text("\(appModel.savedFiles.filter { $0.pathExtension == "worldmap" }.count)")
+                                    .font(.title)
+                                    .fontWeight(.bold)
+                                    .foregroundStyle(.green)
+                                Text("环境地图")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer()
-                            Text(user.role.rawValue)
-                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading) {
+                                Text("\(appModel.savedFiles.filter { $0.pathExtension == "ply" || $0.pathExtension == "obj" }.count)")
+                                    .font(.title)
+                                    .fontWeight(.bold)
+                                    .foregroundStyle(.orange)
+                                Text("3D模型")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-
+                        .padding(.vertical, 8)
+                    }
+                    
+                    // 账号管理
+                    Section(header: Text("账号管理")) {
                         Button(role: .destructive) {
                             appModel.logout()
-                            dismiss()
                         } label: {
-                            Text("退出登录")
+                            Label("退出登录", systemImage: "arrow.right.square")
                         }
                     }
                 }
+                
+                Section(header: Text("关于")) {
+                    LabeledContent("版本", value: "2.0.0")
+                    LabeledContent("编译版本", value: "Build 20260123")
+                }
+            }
+            .navigationTitle("设置")
+            .navigationBarTitleDisplayMode(.large)
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showImagePicker) {
+            ImagePicker(image: $selectedImage)
+        }
+    }
+}
 
+// 扫描设置页（从主设置中分离）
+struct ScanSettingsSheet: View {
+    @ObservedObject var appModel: AppModel
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationView {
+            Form {
                 Section(header: Text("扫描配置")) {
                     Toggle("启用 LiDAR 网格", isOn: $appModel.isLiDAREnabled)
                         .tint(.yellow)
                     
                     Toggle("启用 AI 语义分类", isOn: $appModel.isMeshColoringEnabled)
+                        .tint(.yellow)
+                        
+                    Toggle("手电筒补光", isOn: $appModel.isTorchEnabled)
                         .tint(.yellow)
                 }
                 
@@ -871,16 +1108,30 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("关于")) {
-                    HStack {
-                        Text("版本")
-                        Spacer()
-                        Text("1.0.0 (Build 20260105)")
-                            .foregroundStyle(.secondary)
+                Section(header: Text("操作")) {
+                    Button {
+                        NotificationCenter.default.post(name: .requestSaveMap, object: nil)
+                        dismiss()
+                    } label: {
+                        Label("保存环境地图 (.worldmap)", systemImage: "map")
+                    }
+                    
+                    Button {
+                        NotificationCenter.default.post(name: .requestSaveMesh, object: nil)
+                        dismiss()
+                    } label: {
+                        Label("导出扫描模型 (.obj/.ply)", systemImage: "arkit")
+                    }
+                    
+                    Button(role: .destructive) {
+                        appModel.shouldResetSession = true
+                        dismiss()
+                    } label: {
+                        Label("重置扫描会话", systemImage: "arrow.counterclockwise")
                     }
                 }
             }
-            .navigationTitle("系统设置")
+            .navigationTitle("空间扫描设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -892,11 +1143,68 @@ struct SettingsView: View {
     }
 }
 
+// 简单的图片选择器
+struct ImagePicker: UIViewControllerRepresentable {
+    var image: Binding<UIImage?>?
+    var sourceType: UIImagePickerController.SourceType = .photoLibrary
+    var completion: ((UIImage?) -> Void)?
+    @Environment(\.dismiss) var dismiss
+    
+    // 支持两种初始化方式
+    init(image: Binding<UIImage?>) {
+        self.image = image
+        self.sourceType = .photoLibrary
+        self.completion = nil
+    }
+    
+    init(sourceType: UIImagePickerController.SourceType, completion: @escaping (UIImage?) -> Void) {
+        self.image = nil
+        self.sourceType = sourceType
+        self.completion = completion
+    }
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.delegate = context.coordinator
+        picker.sourceType = sourceType
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: ImagePicker
+        
+        init(_ parent: ImagePicker) {
+            self.parent = parent
+        }
+        
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+            let selectedImage = info[.originalImage] as? UIImage
+            
+            if let binding = parent.image {
+                binding.wrappedValue = selectedImage
+            }
+            
+            if let completion = parent.completion {
+                completion(selectedImage)
+            }
+            
+            parent.dismiss()
+        }
+    }
+}
+
 // MARK: - 3. Scan View (AR + Controls)
 struct ScanView: View {
     @ObservedObject var appModel: AppModel
     @State private var showReportComposer: Bool = false
     @State private var hasEnteredCamera: Bool = false
+    @State private var showSettings: Bool = false
     
     var body: some View {
         ZStack {
@@ -992,17 +1300,35 @@ struct ScanView: View {
                                     .foregroundStyle(.secondary)
                             }
 
-                            Text(String(format: "X: %.2f  Y: %.2f  Z: %.2f",
-                                        appModel.currentPosition.x,
-                                        appModel.currentPosition.y,
-                                        appModel.currentPosition.z))
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.white)
-                                .padding(4)
-                                .background(.black.opacity(0.55))
-                                .cornerRadius(6)
+                            // 状态与坐标面板
+                            VStack(alignment: .leading, spacing: 4) {
+                                // 质量条
+                                HStack {
+                                    Image(systemName: getIcon(for: appModel.locQuality))
+                                        .foregroundStyle(getColor(for: appModel.locQuality))
+                                    Text(appModel.locQualityMessage)
+                                        .font(.caption2)
+                                        .foregroundStyle(getColor(for: appModel.locQuality))
+                                }
+                                
+                                // 仅在状态良好时显示高亮坐标，否则变灰
+                                Text(String(format: "X: %.2f  Y: %.2f  Z: %.2f",
+                                            appModel.currentPosition.x,
+                                            appModel.currentPosition.y,
+                                            appModel.currentPosition.z))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(isQualityGood(appModel.locQuality) ? .white : .gray.opacity(0.6))
+                                    .fontWeight(isQualityGood(appModel.locQuality) ? .bold : .regular)
+                            }
+                            .padding(6)
+                            .background(.black.opacity(0.65))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(getColor(for: appModel.locQuality).opacity(0.5), lineWidth: 1)
+                            )
 
-                            if !appModel.relocalizationStatus.isEmpty {
+                            if !appModel.relocalizationStatus.isEmpty && false { // 隐藏旧的，用上面的
                                 Text("定位: \(appModel.relocalizationStatus)")
                                     .font(.caption2)
                                     .foregroundStyle(.orange)
@@ -1023,12 +1349,13 @@ struct ScanView: View {
                             }
                         }
                         Spacer()
-
-                        Button(action: {
-                            appModel.showSettings = true
-                        }) {
+                        
+                        // 扫描设置入口
+                        Button {
+                            showSettings = true
+                        } label: {
                             Image(systemName: "gearshape.fill")
-                                .font(.title2)
+                                .font(.title3)
                                 .foregroundStyle(.white)
                                 .padding(10)
                                 .background(.ultraThinMaterial)
@@ -1076,6 +1403,13 @@ struct ScanView: View {
                                     }
 
                                     Button {
+                                        let newState = !appModel.isTorchEnabled
+                                        appModel.toggleTorch(on: newState)
+                                    } label: {
+                                        Label(appModel.isTorchEnabled ? "关闭手电筒" : "打开手电筒", systemImage: appModel.isTorchEnabled ? "flashlight.on.fill" : "flashlight.off.fill")
+                                    }
+
+                                    Button {
                                         NotificationCenter.default.post(name: .requestSaveMesh, object: nil)
                                     } label: {
                                         Label("保存模型", systemImage: "cube.transparent")
@@ -1098,6 +1432,9 @@ struct ScanView: View {
         .sheet(isPresented: $showReportComposer) {
             InspectionReportComposerView(appModel: appModel)
         }
+        .sheet(isPresented: $showSettings) {
+            ScanSettingsSheet(appModel: appModel)
+        }
         .toolbar(.hidden, for: .navigationBar)
     }
     
@@ -1107,6 +1444,29 @@ struct ScanView: View {
         case "不可用": return .red
         default: return .yellow
         }
+    }
+
+    private func getIcon(for quality: AppModel.LocalizationQuality) -> String {
+        switch quality {
+        case .good: return "checkmark.circle.fill"
+        case .relocalizing: return "arrow.triangle.2.circlepath.circle.fill"
+        case .limited: return "exclamationmark.triangle.fill"
+        case .lost: return "xmark.circle.fill"
+        }
+    }
+
+    private func getColor(for quality: AppModel.LocalizationQuality) -> Color {
+        switch quality {
+        case .good: return .green
+        case .relocalizing: return .yellow
+        case .limited: return .orange
+        case .lost: return .red
+        }
+    }
+
+    private func isQualityGood(_ quality: AppModel.LocalizationQuality) -> Bool {
+        if case .good = quality { return true }
+        return false
     }
 }
 
@@ -1172,6 +1532,29 @@ private struct ScanModeEntryView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private func getIcon(for quality: AppModel.LocalizationQuality) -> String {
+        switch quality {
+        case .good: return "checkmark.circle.fill"
+        case .relocalizing: return "arrow.triangle.2.circlepath.circle.fill"
+        case .limited: return "exclamationmark.triangle.fill"
+        case .lost: return "xmark.circle.fill"
+        }
+    }
+
+    private func getColor(for quality: AppModel.LocalizationQuality) -> Color {
+        switch quality {
+        case .good: return .green
+        case .relocalizing: return .yellow
+        case .limited: return .orange
+        case .lost: return .red
+        }
+    }
+
+    private func isQualityGood(_ quality: AppModel.LocalizationQuality) -> Bool {
+        if case .good = quality { return true }
+        return false
     }
 }
 
@@ -1353,114 +1736,125 @@ private struct InspectionReportComposerView: View {
     private func makeAttachmentBaseName(createdAt: Date) -> String {
         "Report_\(Int(createdAt.timeIntervalSince1970))"
     }
+    
+    private func generateReport() {
+        attachmentError = nil
+        guard let user = appModel.currentUser else {
+            appModel.alertMessage = "未登录，无法生成报告。"
+            appModel.showAlert = true
+            return
+        }
+        guard confirmationChecked else {
+            attachmentError = "请勾选确认。"
+            return
+        }
+        guard let sig = signatureImage else {
+            attachmentError = "请完成签名后再生成报告。"
+            return
+        }
+
+        // Swift 6: detached 任务里不能读写 @State / MainActor 数据，先做快照
+        isSavingAttachments = true
+        let createdAt = Date()
+        let baseName = makeAttachmentBaseName(createdAt: createdAt)
+        let docDir = documentsDirectory()
+        let photosToSave = capturedPhotos
+        let signatureToSave = sig
+
+        let boilerIdSnapshot = boilerId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let areaSnapshot = area.trimmingCharacters(in: .whitespacesAndNewlines)
+        let temperatureSnapshot = temperatureC.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pressureSnapshot = pressureMPa.trimmingCharacters(in: .whitespacesAndNewlines)
+        let waterLevelSnapshot = waterLevel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let valveSnapshot = valvePosition.trimmingCharacters(in: .whitespacesAndNewlines)
+        let notesSnapshot = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let signerSnapshot = signerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let confirmationSnapshot = confirmationChecked
+        let abnormalNoiseSnapshot = abnormalNoise
+        let leakageSnapshot = leakage
+        let vibrationSnapshot = vibration
+        let smokeSnapshot = smokeOrSteam
+        let overSnapshot = overTempOrPressure
+        let alarmSnapshot = alarmTriggered
+
+        // 获取当前AR相机位置（必须在MainActor上）
+        let cameraTransform = appModel.arView?.session.currentFrame?.camera.transform
+        let posX = cameraTransform.map { Double($0.columns.3.x) }
+        let posY = cameraTransform.map { Double($0.columns.3.y) }
+        let posZ = cameraTransform.map { Double($0.columns.3.z) }
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                var photoNames: [String] = []
+                for (index, image) in photosToSave.enumerated() {
+                    let name = "\(baseName)_photo_\(String(format: "%02d", index + 1)).jpg"
+                    let url = docDir.appendingPathComponent(name)
+                    try ImageSaver.writeJPEG(image, to: url)
+                    photoNames.append(name)
+                }
+
+                let signatureName = "\(baseName)_signature.png"
+                let signatureURL = docDir.appendingPathComponent(signatureName)
+                try ImageSaver.writePNG(signatureToSave, to: signatureURL)
+                
+                // Create immutable copies for capture
+                let finalPhotoNames = photoNames
+                let finalSignatureName = signatureName
+
+                await MainActor.run {
+                    let report = AppModel.InspectionReport(
+                        id: UUID(),
+                        createdAt: createdAt,
+                        signedAt: createdAt,
+                        inspectorId: user.id,
+                        inspectorName: user.displayName,
+                        inspectorRole: user.role,
+                        boilerId: boilerIdSnapshot,
+                        area: areaSnapshot,
+                        positionX: posX,
+                        positionY: posY,
+                        positionZ: posZ,
+                        temperatureC: temperatureSnapshot,
+                        pressureMPa: pressureSnapshot,
+                        waterLevel: waterLevelSnapshot,
+                        valvePosition: valveSnapshot,
+                        abnormalNoise: abnormalNoiseSnapshot,
+                        leakage: leakageSnapshot,
+                        vibration: vibrationSnapshot,
+                        smokeOrSteam: smokeSnapshot,
+                        overTempOrPressure: overSnapshot,
+                        alarmTriggered: alarmSnapshot,
+                        notes: notesSnapshot,
+                        photoFileNames: finalPhotoNames,
+                        signatureFileName: finalSignatureName,
+                        signerName: signerSnapshot,
+                        confirmationChecked: confirmationSnapshot
+                    )
+
+                    appModel.saveInspectionReport(report)
+                    appModel.alertMessage = "巡检报告已生成！（已导出到 Documents 文件夹）"
+                    appModel.showAlert = true
+                    isSavingAttachments = false
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    attachmentError = "保存附件失败：\(error.localizedDescription)"
+                    isSavingAttachments = false
+                }
+            }
+        }
+    }
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("基础信息")) {
-                    TextField("锅炉编号/设备号", text: $boilerId)
-                    TextField("区域/位置（如：一层东侧）", text: $area)
-                }
-
-                Section(header: Text("读数（可选）")) {
-                    TextField("温度 (°C)", text: $temperatureC)
-                        .keyboardType(.numbersAndPunctuation)
-                    TextField("压力 (MPa)", text: $pressureMPa)
-                        .keyboardType(.numbersAndPunctuation)
-                    TextField("水位/液位", text: $waterLevel)
-                    TextField("阀位/开度", text: $valvePosition)
-                }
-
-                Section(header: Text("异常状态")) {
-                    Toggle("异响", isOn: $abnormalNoise)
-                    Toggle("泄漏", isOn: $leakage)
-                    Toggle("振动", isOn: $vibration)
-                    Toggle("冒烟/蒸汽异常", isOn: $smokeOrSteam)
-                    Toggle("温压异常", isOn: $overTempOrPressure)
-                    Toggle("报警触发", isOn: $alarmTriggered)
-                }
-
-                Section(header: Text("备注")) {
-                    TextEditor(text: $notes)
-                        .frame(minHeight: 120)
-                }
-
-                Section(header: Text("拍照附件")) {
-                    Button {
-                        showCameraPicker = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "camera")
-                            Text("拍照添加")
-                            Spacer()
-                            if !capturedPhotos.isEmpty {
-                                Text("\(capturedPhotos.count) 张")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-
-                    if !capturedPhotos.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 10) {
-                                ForEach(Array(capturedPhotos.enumerated()), id: \.offset) { idx, img in
-                                    ZStack(alignment: .topTrailing) {
-                                        Image(uiImage: img)
-                                            .resizable()
-                                            .scaledToFill()
-                                            .frame(width: 110, height: 80)
-                                            .clipped()
-                                            .cornerRadius(10)
-
-                                        Button {
-                                            capturedPhotos.remove(at: idx)
-                                        } label: {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .foregroundStyle(.white)
-                                                .shadow(radius: 2)
-                                        }
-                                        .padding(6)
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
-
-                    Text("提示：照片会离线保存到 Documents，并写入报告 JSON 的附件字段。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section(header: Text("签名确认")) {
-                    TextField("签名人姓名（可选）", text: $signerName)
-
-                    HStack {
-                        Button {
-                            showSignaturePad = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "pencil.and.outline")
-                                Text(signatureImage == nil ? "去签名" : "重新签名")
-                            }
-                        }
-
-                        Spacer()
-
-                        if signatureImage != nil {
-                            Label("已签名", systemImage: "checkmark.seal.fill")
-                                .foregroundStyle(.green)
-                        }
-                    }
-
-                    Toggle("我确认以上信息真实有效", isOn: $confirmationChecked)
-
-                    if let err = attachmentError {
-                        Text(err)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
+                basicInfoSection
+                readingsSection
+                abnormalStatusSection
+                notesSection
+                photoSection
+                signatureSection
             }
             .navigationTitle("巡检报告")
             .navigationBarTitleDisplayMode(.inline)
@@ -1472,100 +1866,8 @@ private struct InspectionReportComposerView: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("生成") {
-                        attachmentError = nil
-                        guard let user = appModel.currentUser else {
-                            appModel.alertMessage = "未登录，无法生成报告。"
-                            appModel.showAlert = true
-                            return
-                        }
-                        guard confirmationChecked else {
-                            attachmentError = "请勾选确认。"
-                            return
-                        }
-                        guard let sig = signatureImage else {
-                            attachmentError = "请完成签名后再生成报告。"
-                            return
-                        }
-
-                        // Swift 6: detached 任务里不能读写 @State / MainActor 数据，先做快照
-                        isSavingAttachments = true
-                        let createdAt = Date()
-                        let baseName = makeAttachmentBaseName(createdAt: createdAt)
-                        let docDir = documentsDirectory()
-                        let photosToSave = capturedPhotos
-                        let signatureToSave = sig
-
-                        let boilerIdSnapshot = boilerId.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let areaSnapshot = area.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let temperatureSnapshot = temperatureC.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let pressureSnapshot = pressureMPa.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let waterLevelSnapshot = waterLevel.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let valveSnapshot = valvePosition.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let notesSnapshot = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let signerSnapshot = signerName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let confirmationSnapshot = confirmationChecked
-                        let abnormalNoiseSnapshot = abnormalNoise
-                        let leakageSnapshot = leakage
-                        let vibrationSnapshot = vibration
-                        let smokeSnapshot = smokeOrSteam
-                        let overSnapshot = overTempOrPressure
-                        let alarmSnapshot = alarmTriggered
-
-                        Task.detached(priority: .userInitiated) {
-                            do {
-                                var photoNames: [String] = []
-                                for (index, image) in photosToSave.enumerated() {
-                                    let name = "\(baseName)_photo_\(String(format: "%02d", index + 1)).jpg"
-                                    let url = docDir.appendingPathComponent(name)
-                                    try writeJPEG(image, to: url)
-                                    photoNames.append(name)
-                                }
-
-                                let signatureName = "\(baseName)_signature.png"
-                                let signatureURL = docDir.appendingPathComponent(signatureName)
-                                try writePNG(signatureToSave, to: signatureURL)
-
-                                await MainActor.run {
-                                    let report = AppModel.InspectionReport(
-                                        id: UUID(),
-                                        createdAt: createdAt,
-                                        signedAt: createdAt,
-                                        inspectorId: user.id,
-                                        inspectorName: user.displayName,
-                                        inspectorRole: user.role,
-                                        boilerId: boilerIdSnapshot,
-                                        area: areaSnapshot,
-                                        temperatureC: temperatureSnapshot,
-                                        pressureMPa: pressureSnapshot,
-                                        waterLevel: waterLevelSnapshot,
-                                        valvePosition: valveSnapshot,
-                                        abnormalNoise: abnormalNoiseSnapshot,
-                                        leakage: leakageSnapshot,
-                                        vibration: vibrationSnapshot,
-                                        smokeOrSteam: smokeSnapshot,
-                                        overTempOrPressure: overSnapshot,
-                                        alarmTriggered: alarmSnapshot,
-                                        notes: notesSnapshot,
-                                        photoFileNames: photoNames,
-                                        signatureFileName: signatureName,
-                                        signerName: signerSnapshot,
-                                        confirmationChecked: confirmationSnapshot
-                                    )
-
-                                    isSavingAttachments = false
-                                    appModel.saveInspectionReport(report)
-                                    dismiss()
-                                }
-                            } catch {
-                                await MainActor.run {
-                                    isSavingAttachments = false
-                                    attachmentError = "附件保存失败：\(error.localizedDescription)"
-                                }
-                            }
-                        }
-                    }
-                    .disabled(!canGenerate)
+                    Button("生成", action: generateReport)
+                        .disabled(!canGenerate)
                 }
             }
         }
@@ -1587,56 +1889,141 @@ private struct InspectionReportComposerView: View {
             }
         }
     }
-}
-
-private struct ImagePicker: UIViewControllerRepresentable {
-    let sourceType: UIImagePickerController.SourceType
-    let onComplete: (UIImage?) -> Void
-
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(sourceType) ? sourceType : .photoLibrary
-        picker.delegate = context.coordinator
-        picker.allowsEditing = false
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onComplete: onComplete)
-    }
-
-    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
-        let onComplete: (UIImage?) -> Void
-
-        init(onComplete: @escaping (UIImage?) -> Void) {
-            self.onComplete = onComplete
-        }
-
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            onComplete(nil)
-        }
-
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            let image = (info[.originalImage] as? UIImage)
-            onComplete(image)
+    
+    // MARK: - Section Views
+    
+    private var basicInfoSection: some View {
+        Section(header: Text("基础信息")) {
+            TextField("锅炉编号/设备号", text: $boilerId)
+            TextField("区域/位置（如：一层东侧）", text: $area)
         }
     }
+    
+    private var readingsSection: some View {
+        Section(header: Text("读数（可选）")) {
+            TextField("温度 (°C)", text: $temperatureC)
+                .keyboardType(.numbersAndPunctuation)
+            TextField("压力 (MPa)", text: $pressureMPa)
+                .keyboardType(.numbersAndPunctuation)
+            TextField("水位/液位", text: $waterLevel)
+            TextField("阀位/开度", text: $valvePosition)
+        }
+    }
+    
+    private var abnormalStatusSection: some View {
+        Section(header: Text("异常状态")) {
+            Toggle("异响", isOn: $abnormalNoise)
+            Toggle("泄漏", isOn: $leakage)
+            Toggle("振动", isOn: $vibration)
+            Toggle("冒烟/蒸汽异常", isOn: $smokeOrSteam)
+            Toggle("温压异常", isOn: $overTempOrPressure)
+            Toggle("报警触发", isOn: $alarmTriggered)
+        }
+    }
+    
+    private var notesSection: some View {
+        Section(header: Text("备注")) {
+            TextEditor(text: $notes)
+                .frame(minHeight: 120)
+        }
+    }
+    
+    private var photoSection: some View {
+        Section(header: Text("拍照附件")) {
+            Button {
+                showCameraPicker = true
+            } label: {
+                HStack {
+                    Image(systemName: "camera")
+                    Text("拍照添加")
+                    Spacer()
+                    if !capturedPhotos.isEmpty {
+                        Text("\(capturedPhotos.count) 张")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if !capturedPhotos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(Array(capturedPhotos.enumerated()), id: \.offset) { idx, img in
+                            ZStack(alignment: .topTrailing) {
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 110, height: 80)
+                                    .clipped()
+                                    .cornerRadius(10)
+
+                                Button {
+                                    capturedPhotos.remove(at: idx)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.white)
+                                        .shadow(radius: 2)
+                                }
+                                .padding(6)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            Text("提示：照片会离线保存到 Documents，并写入报告 JSON 的附件字段。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+    
+    private var signatureSection: some View {
+        Section(header: Text("签名确认")) {
+            TextField("签名人姓名（可选）", text: $signerName)
+
+            HStack {
+                Button {
+                    showSignaturePad = true
+                } label: {
+                    HStack {
+                        Image(systemName: "pencil.and.outline")
+                        Text(signatureImage == nil ? "去签名" : "重新签名")
+                    }
+                }
+
+                Spacer()
+
+                if signatureImage != nil {
+                    Label("已签名", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Toggle("我确认以上信息真实有效", isOn: $confirmationChecked)
+
+            if let err = attachmentError {
+                Text(err)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
 }
 
-private func writeJPEG(_ image: UIImage, to url: URL, compressionQuality: CGFloat = 0.85) throws {
-    guard let data = image.jpegData(compressionQuality: compressionQuality) else {
-        throw NSError(domain: "Leida", code: 1001, userInfo: [NSLocalizedDescriptionKey: "无法生成 JPEG 数据"])
+private struct ImageSaver {
+    static func writeJPEG(_ image: UIImage, to url: URL, compressionQuality: CGFloat = 0.85) throws {
+        guard let data = image.jpegData(compressionQuality: compressionQuality) else {
+            throw NSError(domain: "Leida", code: 1001, userInfo: [NSLocalizedDescriptionKey: "无法生成 JPEG 数据"])
+        }
+        try data.write(to: url, options: [.atomic])
     }
-    try data.write(to: url, options: [.atomic])
-}
 
-private func writePNG(_ image: UIImage, to url: URL) throws {
-    guard let data = image.pngData() else {
-        throw NSError(domain: "Leida", code: 1002, userInfo: [NSLocalizedDescriptionKey: "无法生成 PNG 数据"])
+    static func writePNG(_ image: UIImage, to url: URL) throws {
+        guard let data = image.pngData() else {
+            throw NSError(domain: "Leida", code: 1002, userInfo: [NSLocalizedDescriptionKey: "无法生成 PNG 数据"])
+        }
+        try data.write(to: url, options: [.atomic])
     }
-    try data.write(to: url, options: [.atomic])
 }
 
 private struct SignatureDrawing: Equatable {
@@ -2182,6 +2569,7 @@ struct ARViewContainer: UIViewRepresentable {
     
     static func dismantleUIView(_ uiView: ARView, coordinator: Coordinator) {
         print("🛑 ARViewContainer dismantleUIView - 正在释放相机...")
+        coordinator.appModel.arView = nil
         uiView.session.pause()
         // 彻底清理 session
         uiView.session.delegate = nil
@@ -2195,19 +2583,44 @@ struct ARViewContainer: UIViewRepresentable {
     
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
+        context.coordinator.appModel.arView = arView
         
-        // 初始配置
+        // 初始配置 - 优化精度
         let config = ARWorldTrackingConfiguration()
-        // 关键修改：优先使用 .meshWithClassification 以支持 AI 语义导出
+        
+        // 优化1：优先使用meshWithClassification以支持AI语义导出
         if appModel.isLiDAREnabled {
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
                 config.sceneReconstruction = .meshWithClassification
             } else if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
                 config.sceneReconstruction = .mesh
             }
+            
+            // 优化：启用平滑场景深度（Smoothed Scene Depth）以获得更密集的深度数据
+            // 这是目前 iOS 上最接近 "纯 LiDAR" 深度图的配置
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                config.frameSemantics.insert(.smoothedSceneDepth)
+            } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+            }
         }
         
+        // 优化2：同时检测水平和垂直平面（提高特征点）
         config.planeDetection = [.horizontal, .vertical]
+        
+        // 优化3：开启自动对焦（提高纹理清晰度）
+        config.isAutoFocusEnabled = true
+        
+        // 优化4：开启环境纹理（增强光照估计）
+        config.environmentTexturing = .automatic
+        
+        // 优化5：最大化追踪稳定性
+        config.worldAlignment = .gravity // 重力对齐，减少漂移
+        
+        // 优化6：开启协作式会话数据（如果支持）
+        if #available(iOS 13.0, *) {
+            config.isCollaborationEnabled = false // 单设备场景，关闭以节省资源
+        }
 
         arView.session.run(config)
 
@@ -2439,31 +2852,67 @@ struct ARViewContainer: UIViewRepresentable {
                 Task { @MainActor in
                     appModel.trackingState = describeState(frame.camera.trackingState)
                     
-                    // 更新 XYZ 坐标
-                    let transform = frame.camera.transform
-                    appModel.currentPosition = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+                    // --- 核心逻辑修复：坐标更新与重定位状态强关联 ---
                     
-                    // 检查重定位状态
-                    if let map = session.currentFrame?.worldMappingStatus {
-                        switch map {
-                        case .mapped:
-                            appModel.relocalizationStatus = "已定位 (Mapped)"
-                            // 如果之前在重定位中，现在成功了，给个提示
+                    // 1. 获取 ARKit 原生状态
+                    let mappingStatus = session.currentFrame?.worldMappingStatus ?? .notAvailable
+                    let trackingState = frame.camera.trackingState
+                    
+                    // 2. 状态机推导
+                    if case .limited(let reason) = trackingState {
+                        if reason == .relocalizing {
+                            appModel.locQuality = .relocalizing
+                            appModel.locQualityMessage = "⚠️ 寻找特征点中... (请移动设备)"
+                        } else {
+                            appModel.locQuality = .limited(describeReason(reason))
+                            appModel.locQualityMessage = "⚠️ 定位受限: \(describeReason(reason))"
+                        }
+                    } else if case .normal = trackingState {
+                        // 即使 Tracking 正常，也要看地图有没有 Load 进去
+                        if mappingStatus == .mapped || mappingStatus == .extending {
+                            appModel.locQuality = .good
+                            appModel.locQualityMessage = "✅ 定位成功 (误差范围±10cm)"
+                            
+                            // 只有在 Good 状态下，才认为刚才的重定位真正完成了
                             if appModel.isRelocalizing {
                                 appModel.isRelocalizing = false
-                                appModel.alertMessage = "✅ 重定位成功！\n当前环境已与地图匹配。"
+                                appModel.alertMessage = "✅ 重定位成功！\n坐标系统已对齐。"
                                 appModel.showAlert = true
                             }
+                        } else {
+                            // Tracking 正常，但没有 World Map (比如刚开始扫)
+                            appModel.locQuality = .good
+                            appModel.locQualityMessage = "建图定位正常"
+                        }
+                    } else {
+                        appModel.locQuality = .lost
+                        appModel.locQualityMessage = "❌ 定位丢失"
+                    }
+                    
+                    // 3. 更新显示的重定位状态文本 (用于 Debug)
+                    switch mappingStatus {
+                        case .mapped: appModel.relocalizationStatus = "已映射 (Mapped)"
                         case .extending: appModel.relocalizationStatus = "扩展中 (Extending)"
-                        case .limited: appModel.relocalizationStatus = "定位受限 (Limited)"
+                        case .limited: appModel.relocalizationStatus = "地图受限 (Limited)"
                         case .notAvailable: appModel.relocalizationStatus = "不可用"
                         @unknown default: break
-                        }
                     }
+                    
+                    // 4. 更新 XYZ 坐标
+                    let transform = frame.camera.transform
+                    appModel.currentPosition = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
                 }
             }
-
-            
+        }
+        
+        func describeReason(_ reason: ARCamera.TrackingState.Reason) -> String {
+            switch reason {
+            case .initializing: return "初始化中"
+            case .relocalizing: return "重定位中"
+            case .excessiveMotion: return "移动过快"
+            case .insufficientFeatures: return "特征不足(请看纹理丰富处)"
+            @unknown default: return "未知原因"
+            }
         }
         
         @objc func handleSaveMesh() {

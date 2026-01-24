@@ -8,6 +8,8 @@
 
 ### 1. 空间 LiDAR 扫描 (Spatial LiDAR Scanning)
 - **实时网格化**：利用 LiDAR 深度传感器实时生成环境的三维网格 (Mesh)。
+- **定位质量实时反馈**：交通灯式UI指示器（绿/黄/红），实时显示ARKit定位状态与地图就绪程度。
+- **手电筒支持**：内置闪光灯开关，解决黑暗环境（锅炉内部）定位失效问题。
 - **AI 语义着色**：基于机器学习自动识别场景元素（墙壁、地板、天花板、桌椅等），并以不同颜色进行可视化区分。
 - **多格式导出**：
   - **.OBJ**：通用 3D 格式，适用于大多数建模软件（白模）。
@@ -44,7 +46,27 @@ export AI_API_KEY='你的密钥'
 export AI_BASE_URL='https://aistudio.baidu.com/llm/lmapi/v3'
 python ai_report_review.py --report /path/to/Report_123.json --model ernie-x1.1-preview
 ```
+### 7. 物联网可视化大屏 (IoT Dashboard)
+#### 数据大屏版（dashboard.html）
+- **专业监控界面**：参考工业监控系统设计，深蓝科技风格，九宫格响应式布局。
+- **3D可视化**：Three.js实时渲染锅炉模型，支持旋转动画，红点标记告警位置。
+- **多维度图表**：ECharts集成温度趋势、压力分布、隐患分类饼图、设备运行雷达图。
+- **数据加载**：点击"加载JSON"按钮选择App导出的Report_*.json文件，点击3D场景中的球体查看详情。
 
+#### 管理系统版（dashboard_system.html）⭐️ 推荐
+- **左侧导航栏**：5大功能模块切换
+  - 📊 **数据大屏**：嵌入dashboard.html的3D可视化视图
+  - 📋 **巡检报告**：表格形式展示所有报告记录
+  - 👥 **员工管理**：卡片展示各员工巡检统计（次数/告警数）
+  - 📈 **统计分析**：时间分布柱状图、问题类型饼图
+  - ⚙️ **系统设置**：上传JSON数据文件
+- **数据格式兼容**：自动识别单报告或多报告合集格式
+- **使用流程**：
+  1. 在App中生成巡检报告（自动保存为兼容格式）
+  2. 通过AirDrop将Report_*.json传到电脑
+  3. 浏览器打开dashboard_system.html
+  4. 进入"系统设置"上传JSON文件
+  5. 切换各模块查看不同维度的数据
 ---
 
 ## 🧭 角色与使用流程 (Workflows)
@@ -118,13 +140,6 @@ ARKit 的 `ARWorldMap` 可以理解为：
 - ARFrame.worldMappingStatus: https://developer.apple.com/documentation/arkit/arframe/2865793-worldmappingstatus
 - ARCamera.TrackingState: https://developer.apple.com/documentation/arkit/arcamera/trackingstate
 
----
-
-## 🔍 关于“是否真的用了 LiDAR”
-- 在支持 LiDAR 的设备上：App 会开启 ARKit 的 `sceneReconstruction`（mesh/meshWithClassification），并可导出网格文件。
-- 在不支持 LiDAR 的设备上：无法开启网格重建；仍可进行 AR 追踪/平面检测，但不会产生可导出的 LiDAR 网格。
-
----
 
 ## 🛠 技术栈 (Tech Stack)
 
