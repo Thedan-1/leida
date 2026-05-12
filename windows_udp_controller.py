@@ -430,3 +430,34 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# =========================================================================
+# 预留接口：反向控制（由手机主动触发电脑开启雷达）
+# =========================================================================
+def wait_for_phone_start(port=4444):
+    """
+    供其他开发者调用的简单预留函数：监听手机发来的 'START_RADAR' 信号，
+    收到信号后启动电脑本地的雷达程序。
+    可以在主程序逻辑中新开一个线程运行此函数。
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(('0.0.0.0', port))
+    server.listen(1)
+    print(f"👂 [预留接口] 等待手机点击开始按钮 (监听端口 {port})...")
+    
+    try:
+        conn, addr = server.accept()
+        data = conn.recv(1024).decode().strip()
+        if data == "START_RADAR":
+            print(f"🚀 [预留接口] 收到来自iPhone {addr} 的启动信号！准备同步唤醒雷达...")
+            # ==========================================
+            # 在此处写入开启毫米波雷达的调用逻辑，例如：
+            # import radarControl
+            # radarControl.start_radar_capture() 
+            # ==========================================
+            conn.send("RADAR_STARTED".encode())
+        conn.close()
+    except Exception as e:
+        print(f"监听发生异常: {e}")
+    finally:
+        server.close()
