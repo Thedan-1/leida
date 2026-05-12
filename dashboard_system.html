@@ -483,11 +483,7 @@
                     <span class="nav-item-icon">📈</span>
                     <span>统计分析</span>
                 </div>
-                <!-- 新增 AI 助手入口 -->
-                <div class="nav-item" onclick="switchPage('ai-agent')">
-                    <span class="nav-item-icon">🤖</span>
-                    <span>AI 智能助手</span>
-                </div>
+                
                 <div class="nav-item" onclick="switchPage('settings')">
                     <span class="nav-item-icon">⚙️</span>
                     <span>系统设置</span>
@@ -808,45 +804,6 @@
                     <h3 style="color: #ef4444; margin-bottom: 16px; font-size: 16px;">⚠️ 智能预警提示</h3>
                     <div id="alertSummary" style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; padding: 16px; border-radius: 8px;">
                         <div style="color: #fca5a5;">暂无预警信息，系统运行正常 ✓</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- AI 智能助手页面 -->
-            <div id="ai-agentPage" class="page">
-                <div class="reports-header">
-                    <h2>工业安全大模型助手</h2>
-                    <p>基于 ERNIE-X1.1 | 实时分析巡检数据</p>
-                </div>
-                <div style="display: flex; flex-direction: column; height: calc(100vh - 120px); padding: 20px;">
-                    <!-- 聊天记录区域 -->
-                    <div id="chatHistory" style="flex: 1; border: 2px solid #3b82f6; background: rgba(13, 17, 23, 0.8); padding: 20px; overflow-y: auto; margin-bottom: 20px; border-radius: 8px;">
-                        <div style="display: flex; gap: 12px; margin-bottom: 20px;">
-                            <div style="width: 36px; height: 36px; background: #3b82f6; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: white;">🤖</div>
-                            <div style="background: rgba(59, 130, 246, 0.2); padding: 12px 16px; border-radius: 12px; max-width: 80%; color: #e2e8f0; border: 1px solid rgba(59, 130, 246, 0.3);">
-                                您好！如果不清楚如何分析，您可以点击下方快捷指令，或者直接问我：<br>
-                                "当前数据的安全隐患有哪些？"<br>
-                                "生成一份简要的巡检总结报告"<br>
-                                "分析一下#1号锅炉的运行状况"
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 快捷指令 -->
-                    <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                        <button onclick="sendQuickMessage('基于当前上传的数据，生成一份安全巡检总结报告')" style="background: rgba(59,130,246,0.1); border: 1px solid #3b82f6; color: #3b82f6; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 13px;">📑 生成总结报告</button>
-                        <button onclick="sendQuickMessage('分析当前数据中所有的告警记录，并给出整改建议')" style="background: rgba(59,130,246,0.1); border: 1px solid #3b82f6; color: #3b82f6; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 13px;">⚠️ 分析告警隐患</button>
-                        <button onclick="sendQuickMessage('哪些设备的故障率最高？')" style="background: rgba(59,130,246,0.1); border: 1px solid #3b82f6; color: #3b82f6; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 13px;">📊 统计高频故障</button>
-                    </div>
-
-                    <!-- 输入区域 -->
-                    <div style="display: flex; gap: 10px; padding-bottom: 20px;">
-                        <input type="text" id="aiInput" placeholder="请输入您的问题，例如：'分析一下温度异常的原因'..." 
-                               style="flex: 1; padding: 15px; background: #0d1117; border: 2px solid #3b82f6; color: white; border-radius: 8px; outline: none; font-size: 14px;">
-                        <button onclick="sendAIMessage()" id="aiSendBtn"
-                                style="padding: 0 30px; background: #3b82f6; border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; transition: all 0.2s;">
-                            发送
-                        </button>
                     </div>
                 </div>
             </div>

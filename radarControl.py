@@ -1,11 +1,6 @@
 """
-radarControl.py (Stable Single-Connection + Safe Exit + Optional PostProc)
---------------------------------------------------------------------------
-自动化控制 mmWaveStudio 的 Python 版本。
-✅ 只建立一次连接，在循环中复用；
-✅ 支持 Ctrl+C 安全退出；
-✅ 可选 PostProc.lua 后处理；
-✅ 在退出时安全关闭连接。
+radarControl.py """
+毫米波雷达自动化控制脚本
 """
 
 import time

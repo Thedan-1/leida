@@ -2,17 +2,7 @@
 """
 iPhone 精度测试 UDP 远程控制脚本 (Windows 上位机端)
 
-协议流程:
-  1. PREPARE → iPhone 预热 AR (2秒)
-  2. iPhone 回复 READY
-  3. GO → iPhone 开始记录 + 同时启动导轨
-  4. STOP → iPhone 停止记录并导出 CSV
-
-使用方法:
-  python windows_udp_controller.py --ip <iPhone_IP>
-
-确保 iPhone 和 Windows 在同一 WiFi 局域网下。
-iPhone 端在"精度测试"页面中打开 UDP 开关。
+提供UDP环境下的精度校准控制逻辑。
 """
 
 import socket
