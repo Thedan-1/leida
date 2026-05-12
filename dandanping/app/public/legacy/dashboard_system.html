@@ -992,7 +992,10 @@
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
             
             document.getElementById(pageName + 'Page').classList.add('active');
-            event.target.closest('.nav-item').classList.add('active');
+            if (window.event && window.event.target && window.event.target.closest) {
+                const item = window.event.target.closest('.nav-item');
+                if (item) item.classList.add('active');
+            }
             
             // 如果切换到统计分析页面，初始化或更新图表
             if (pageName === 'analytics') {
@@ -2222,5 +2225,27 @@ ${dataContext}`;
      // replaced end
 
     </script>
+<script>
+window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'navigate') {
+        const pageName = event.data.pageName;
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        const targetPage = document.getElementById(pageName + 'Page');
+        if (targetPage) targetPage.classList.add('active');
+        if(pageName === 'analytics' && typeof updateAnalytics === 'function') setTimeout(() => updateAnalytics(), 100);
+    }
+});
+if (window.location.search.includes('fused=1')) {
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) sidebar.style.display = 'none';
+    const mainContent = document.querySelector('.main-content');
+    if (mainContent) {
+        mainContent.style.width = '100%';
+        mainContent.style.height = '100vh';
+        mainContent.classList.add('fused-mode');
+    }
+    document.body.style.background = 'transparent';
+}
+</script>
 </body>
 </html>

@@ -24,6 +24,12 @@
 	<string>BoilerPatrol需要访问摄像头以使用LiDAR进行环境感知与定位。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>BoilerPatrol需要访问麦克风以进行视频录制（如果需要）。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BoilerPatrol需要访问本地局域网，以通过UDP与上位机（PC）进行精度测试同步通信。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bonjour._tcp</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
